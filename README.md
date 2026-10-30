@@ -1,3 +1,5 @@
+![Banner](banner.png)
+
 # dso-url-parameter-redactor
 A command-line tool that analyzes web server access logs and redacts sensitive parameters (e.g., API keys, passwords, session IDs) from URLs, replacing them with placeholders to protect user privacy and prevent data leakage in logs. - Focused on Tools for sanitizing and obfuscating sensitive data within text files and structured data formats
 
