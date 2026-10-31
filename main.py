@@ -4,13 +4,6 @@ import re
 import sys
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
 
-# Attempt to import faker; if not available, provide instructions
-try:
-    from faker import Faker
-except ImportError:
-    print("Error: The 'faker' library is required.  Please install it using 'pip install faker'.")
-    sys.exit(1)
-
 # Attempt to import chardet; if not available, provide instructions
 try:
     import chardet
@@ -70,157 +63,106 @@ def setup_argparse():
 
 
 def redact_url_parameters(url, params_to_redact, redaction_string="REDACTED"):
-    """
-    Redacts specified parameters from a URL, replacing their values with a placeholder.
-
-    Args:
-        url (str): The URL to redact.
-        params_to_redact (list): A list of parameter names to redact.
-        redaction_string (str): The string to replace the redacted parameter values with.  Defaults to "REDACTED".
-
-    Returns:
-        str: The redacted URL.  Returns the original URL if parsing fails.
-    """
+    """Redact specified parameters. Returns (redacted_url, redaction_count)."""
     try:
         parsed_url = urlparse(url)
-        query_params = parse_qs(parsed_url.query)
-
-        for param in params_to_redact:
-            if param in query_params:
-                query_params[param] = [redaction_string]  # Replace with redacted string
-
-        redacted_query = urlencode(query_params, doseq=True)
-        redacted_url = urlunparse(
-            (
-                parsed_url.scheme,
-                parsed_url.netloc,
-                parsed_url.path,
-                parsed_url.params,
-                redacted_query,
-                parsed_url.fragment,
-            )
-        )
-        return redacted_url
+        if not parsed_url.query:
+            return url, 0
+        parts = parsed_url.query.split("&")
+        count = 0
+        out_parts = []
+        for part in parts:
+            if "=" in part:
+                name, value = part.split("=", 1)
+            else:
+                name, value = part, None
+            if name in params_to_redact:
+                out_parts.append(f"{name}={redaction_string}")
+                count += 1
+            else:
+                out_parts.append(part)
+        redacted_url = urlunparse((parsed_url.scheme, parsed_url.netloc, parsed_url.path, parsed_url.params, "&".join(out_parts), parsed_url.fragment))
+        return redacted_url, count
     except Exception as e:
-        logging.error(f"Error redacting URL {url}: {e}")
-        return url  # Return the original URL in case of error
-
+        logging.error(f"Error redacting URL: {e}")
+        raise
 
 def process_line(line, params_to_redact, redaction_string):
-    """
-    Processes a single line, redacting URLs if found.
-
-    Args:
-        line (str): The line to process.
-        params_to_redact (list):  A list of parameter names to redact.
-        redaction_string (str): The string to replace the redacted parameter values with.
-
-    Returns:
-        str: The processed line with URLs redacted.
-    """
-    # Updated regex to be more robust, handling more diverse URL patterns
-    url_pattern = re.compile(
-        r"""
-        \b
-        (
-            https?://              # Required scheme
-            (?:
-                [a-zA-Z0-9.-]+      # Domain name segments
-                |                  # OR
-                \[[a-fA-F0-9:]+\]  # IPv6 literal address
-            )
-            (?:
-                :
-                [0-9]+              # Optional port number
-            )?
-            (?:
-                /                   # Path component
-                [a-zA-Z0-9_@%+-]*.
-                [a-zA-Z0-9_@%+-]*
-            )*
-            (?:                   # Start of query string (optional)
-                \?
-                [a-zA-Z0-9_@%&+=;-]*
-                [a-zA-Z0-9_@%&+=;-]*
-            )?
-            (?:                   # Start of fragment (optional)
-                \#
-                [a-zA-Z0-9_@%&+=;-]*
-                [a-zA-Z0-9_@%&+=;-]*
-            )?
-        )
-        \b
-        """,
-        re.VERBOSE,
-    )
-
-
+    """Processes a single line. Returns (processed_line, redaction_count)."""
+    url_pattern = re.compile(r"https?://[^\s'\"<>]+")
+    total = [0]
     def replace_url(match):
-        url = match.group(1)  # Extract the entire URL
-        return redact_url_parameters(url, params_to_redact, redaction_string)
-
+        url = match.group(0)
+        redacted, n = redact_url_parameters(url, params_to_redact, redaction_string)
+        total[0] += n
+        return redacted
     redacted_line = url_pattern.sub(replace_url, line)
-    return redacted_line
-
+    return redacted_line, total[0]
 
 def main():
-    """
-    Main function to parse arguments, read input, process URLs, and write output.
-    """
     args = setup_argparse()
-
-    # Set the logging level
     logging.getLogger().setLevel(args.log_level)
-
     params_to_redact = [p.strip() for p in args.parameters.split(",")]
     redaction_string = args.redaction_string
-
+    # Same-path guard before opening anything for write.
+    if args.input != "-" and args.output:
+        from pathlib import Path
+        try:
+            if Path(args.input).resolve() == Path(args.output).resolve():
+                logging.error("Output path resolves to the input file. Refusing to overwrite the input.")
+                sys.exit(1)
+        except SystemExit:
+            raise
+        except Exception:
+            pass
+    # Read the input fully before the output is opened.
     try:
-        if args.input == "-":  # Read from standard input
+        if args.input == "-":
             logging.info("Reading from standard input.")
-            input_stream = sys.stdin
+            text = sys.stdin.read()
         else:
             logging.info(f"Reading from file: {args.input}")
             try:
                 with open(args.input, "rb") as f:
                     raw_data = f.read()
                     encoding_result = chardet.detect(raw_data)
-                    encoding = encoding_result["encoding"]
-                input_stream = open(args.input, "r", encoding=encoding)
+                    encoding = encoding_result["encoding"] or "utf-8"
+                text = raw_data.decode(encoding)
             except FileNotFoundError:
                 logging.error(f"Input file not found: {args.input}")
                 sys.exit(1)
-            except Exception as e:
-                logging.error(f"Error opening input file: {e}")
-                sys.exit(1)
-
-        if args.output:
-            logging.info(f"Writing to file: {args.output}")
-            try:
-                output_stream = open(args.output, "w")
-            except Exception as e:
-                logging.error(f"Error opening output file: {e}")
-                sys.exit(1)
-        else:
-            logging.info("Writing to standard output.")
-            output_stream = sys.stdout
-
-        try:
-            for line in input_stream:
-                redacted_line = process_line(line, params_to_redact, redaction_string)
-                output_stream.write(redacted_line)
-        except Exception as e:
-            logging.error(f"Error processing data: {e}")
-        finally:
-            if args.input != "-" and input_stream:
-                input_stream.close()
-            if args.output and output_stream:
-                output_stream.close()
-
+    except SystemExit:
+        raise
     except Exception as e:
-        logging.critical(f"An unexpected error occurred: {e}")
+        logging.error(f"Error reading input: {e}")
         sys.exit(1)
-
+    # Process in memory; an exception exits 1 and writes nothing.
+    total = 0
+    out_lines = []
+    try:
+        for line in text.splitlines(keepends=True):
+            redacted_line, n = process_line(line, params_to_redact, redaction_string)
+            total += n
+            out_lines.append(redacted_line)
+    except Exception as e:
+        logging.error(f"Error processing data: {e}")
+        print(f"Redactions: {total}")
+        sys.exit(1)
+    print(f"Redactions: {total}")
+    logging.info(f"Redactions: {total}")
+    if total == 0:
+        print("No parameters redacted.")
+        sys.exit(1)
+    output_text = "".join(out_lines)
+    if args.output:
+        try:
+            with open(args.output, "w") as f:
+                f.write(output_text)
+        except Exception as e:
+            logging.error(f"Error opening output file: {e}")
+            sys.exit(1)
+    else:
+        sys.stdout.write(output_text)
 
 if __name__ == "__main__":
     main()
